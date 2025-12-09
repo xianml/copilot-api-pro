@@ -34,21 +34,38 @@ interface RunServerOptions {
   daemon: boolean
 }
 
-export async function runServer(options: RunServerOptions): Promise<void> {
-  if (options.proxyEnv) {
-    initProxyFromEnv()
-  }
+interface PreparedDaemonEnv {
+  [key: string]: string | undefined
+}
 
+const isProcessRunning = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM means the process exists but we lack permission to signal it
+    // ESRCH means no such process
+    // For any other error, assume not running.
+    if (
+      error
+      && typeof error === "object"
+      && "code" in error
+      && (error as NodeJS.ErrnoException).code === "EPERM"
+    ) {
+      return true
+    }
+    return false
+  }
+}
+
+async function baseSetup(options: RunServerOptions): Promise<string> {
+  if (options.proxyEnv) initProxyFromEnv()
   if (options.verbose) {
     consola.level = 5
     consola.info("Verbose logging enabled")
   }
 
   state.accountType = options.accountType
-  if (options.accountType !== "individual") {
-    consola.info(`Using ${options.accountType} plan GitHub account`)
-  }
-
   state.manualApprove = options.manual
   state.rateLimitSeconds = options.rateLimit
   state.rateLimitWait = options.rateLimitWait
@@ -71,74 +88,99 @@ export async function runServer(options: RunServerOptions): Promise<void> {
     `Available models: \n${state.models?.data.map((model) => `- ${model.id}`).join("\n")}`,
   )
 
-  const serverUrl = `http://localhost:${options.port}`
+  return `http://localhost:${options.port}`
+}
+
+async function selectClaudeModels(options: RunServerOptions) {
+  invariant(state.models, "Models should be loaded by now")
+
+  const storedConfig = await loadClaudeCodeConfig()
+  const hasStored =
+    storedConfig !== null
+    && state.models.data.some((model) => model.id === storedConfig.model)
+    && state.models.data.some((model) => model.id === storedConfig.smallModel)
+
+  const useStored = hasStored && !options.claudeCodeReset
+
+  const selectedModel =
+    useStored ?
+      storedConfig.model
+    : await consola.prompt("Select a model to use with Claude Code", {
+        type: "select",
+        options: state.models.data.map((model) => model.id),
+      })
+
+  const selectedSmallModel =
+    useStored ?
+      storedConfig.smallModel
+    : await consola.prompt("Select a small model to use with Claude Code", {
+        type: "select",
+        options: state.models.data.map((model) => model.id),
+      })
+
+  if (!useStored) {
+    const config = { model: selectedModel, smallModel: selectedSmallModel }
+    await saveClaudeCodeConfig(config)
+    consola.info(
+      `Saved Claude Code config to ${PATHS.CLAUDE_CODE_CONFIG_PATH}: model="${config.model}", small="${config.smallModel}"`,
+    )
+  }
+
+  return { selectedModel, selectedSmallModel }
+}
+
+function buildClaudeCommand(
+  serverUrl: string,
+  model: string,
+  smallModel: string,
+) {
+  return generateEnvScript(
+    {
+      ANTHROPIC_BASE_URL: serverUrl,
+      ANTHROPIC_AUTH_TOKEN: "dummy",
+      ANTHROPIC_MODEL: model,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+      ANTHROPIC_SMALL_FAST_MODEL: smallModel,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: smallModel,
+      DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    },
+    "claude",
+  )
+}
+
+function buildCodexCommand(serverUrl: string, model: string): string {
+  return [
+    "codex",
+    `-c model_providers.copilot-api.name=copilot-api`,
+    `-c model_providers.copilot-api.base_url=${serverUrl}/v1`,
+    `-c model_providers.copilot-api.wire_api=responses`,
+    `-c model_provider=copilot-api`,
+    `-c model_reasoning_effort=high`,
+    `-m ${model}`,
+  ].join(" ")
+}
+async function prepareDaemon(
+  options: RunServerOptions,
+): Promise<PreparedDaemonEnv> {
+  const serverUrl = await baseSetup(options)
+  const envExtras: PreparedDaemonEnv = {}
+
+  if (options.claudeCodeReset) {
+    await clearClaudeCodeConfig()
+    consola.info("Resetting stored Claude Code config; re-selecting models.")
+  }
 
   if (options.claudeCode) {
-    invariant(state.models, "Models should be loaded by now")
+    const { selectedModel, selectedSmallModel } =
+      await selectClaudeModels(options)
+    envExtras.COPILOT_API_CLAUDE_MODEL = selectedModel
+    envExtras.COPILOT_API_CLAUDE_SMALL_MODEL = selectedSmallModel
 
-    const storedConfig = await loadClaudeCodeConfig()
-    if (storedConfig) {
-      consola.info(
-        `Claude Code config: model="${storedConfig.model}", small="${storedConfig.smallModel}", path=${PATHS.CLAUDE_CODE_CONFIG_PATH}`,
-      )
-    }
-
-    if (options.claudeCodeReset && storedConfig) {
-      consola.info(
-        "Resetting stored Claude Code config; re-prompting selection.",
-      )
-      await clearClaudeCodeConfig()
-    }
-
-    const effectiveStored = options.claudeCodeReset ? null : storedConfig
-    const validConfig =
-      effectiveStored
-      && state.models.data.some((model) => model.id === effectiveStored.model)
-      && state.models.data.some(
-        (model) => model.id === effectiveStored.smallModel,
-      )
-    const configToUse = validConfig ? effectiveStored : null
-
-    if (!configToUse && options.daemon) {
-      throw new Error(
-        "Claude Code config not found. Run `copilot-api start --claude-code` once without --daemon to set it.",
-      )
-    }
-
-    const selectedModel =
-      configToUse?.model
-      ?? (await consola.prompt("Select a model to use with Claude Code", {
-        type: "select",
-        options: state.models.data.map((model) => model.id),
-      }))
-
-    const selectedSmallModel =
-      configToUse?.smallModel
-      ?? (await consola.prompt("Select a small model to use with Claude Code", {
-        type: "select",
-        options: state.models.data.map((model) => model.id),
-      }))
-
-    if (!configToUse || options.claudeCodeReset) {
-      const config = { model: selectedModel, smallModel: selectedSmallModel }
-      await saveClaudeCodeConfig(config)
-      consola.info(
-        `Saved Claude Code config to ${PATHS.CLAUDE_CODE_CONFIG_PATH}: model="${config.model}", small="${config.smallModel}"`,
-      )
-    }
-
-    const command = generateEnvScript(
-      {
-        ANTHROPIC_BASE_URL: serverUrl,
-        ANTHROPIC_AUTH_TOKEN: "dummy",
-        ANTHROPIC_MODEL: selectedModel,
-        ANTHROPIC_DEFAULT_SONNET_MODEL: selectedModel,
-        ANTHROPIC_SMALL_FAST_MODEL: selectedSmallModel,
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: selectedSmallModel,
-        DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-      },
-      "claude",
+    const command = buildClaudeCommand(
+      serverUrl,
+      selectedModel,
+      selectedSmallModel,
     )
 
     try {
@@ -162,15 +204,9 @@ export async function runServer(options: RunServerOptions): Promise<void> {
       },
     )
 
-    const codexCommand = [
-      "codex",
-      `-c model_providers.copilot-api.name=copilot-api`,
-      `-c model_providers.copilot-api.base_url=${serverUrl}/v1`,
-      `-c model_providers.copilot-api.wire_api=responses`,
-      `-c model_provider=copilot-api`,
-      `-c model_reasoning_effort=high`,
-      `-m ${selectedModel}`,
-    ].join(" ")
+    envExtras.COPILOT_API_CODEX_MODEL = selectedModel
+
+    const codexCommand = buildCodexCommand(serverUrl, selectedModel)
 
     try {
       clipboard.writeSync(codexCommand)
@@ -179,6 +215,158 @@ export async function runServer(options: RunServerOptions): Promise<void> {
       consola.warn("Failed to copy Codex command. Here it is:")
       consola.log(codexCommand)
     }
+  }
+
+  return envExtras
+}
+
+type ClaudeConfig = { model: string; smallModel: string }
+
+function getEnvClaudeConfig(): ClaudeConfig | null {
+  if (
+    process.env.COPILOT_API_CLAUDE_MODEL
+    && process.env.COPILOT_API_CLAUDE_SMALL_MODEL
+  ) {
+    return {
+      model: process.env.COPILOT_API_CLAUDE_MODEL,
+      smallModel: process.env.COPILOT_API_CLAUDE_SMALL_MODEL,
+    }
+  }
+  return null
+}
+
+async function maybeClearStoredClaude(options: RunServerOptions) {
+  if (!options.claudeCodeReset) return
+  await clearClaudeCodeConfig()
+  consola.info("Resetting stored Claude Code config; re-selecting models.")
+}
+
+function logStoredClaude(storedConfig: ClaudeConfig | null) {
+  if (!storedConfig) return
+  consola.info(
+    `Claude Code config: model="${storedConfig.model}", small="${storedConfig.smallModel}", path=${PATHS.CLAUDE_CODE_CONFIG_PATH}`,
+  )
+}
+
+function hasValidClaudeConfig(
+  config: ClaudeConfig | null,
+  models: Array<{ id: string }>,
+): config is ClaudeConfig {
+  return Boolean(
+    config
+      && models.some((model) => model.id === config.model)
+      && models.some((model) => model.id === config.smallModel),
+  )
+}
+
+// eslint-disable-next-line max-params
+async function chooseClaudeModels(
+  options: RunServerOptions,
+  envConfig: ClaudeConfig | null,
+  storedConfig: ClaudeConfig | null,
+  models: Array<{ id: string }>,
+): Promise<{ config: ClaudeConfig; shouldPersist: boolean }> {
+  const candidate = options.claudeCodeReset ? null : (envConfig ?? storedConfig)
+  if (hasValidClaudeConfig(candidate, models)) {
+    return { config: candidate, shouldPersist: false }
+  }
+
+  const model = await consola.prompt("Select a model to use with Claude Code", {
+    type: "select",
+    options: models.map((m) => m.id),
+  })
+  const smallModel = await consola.prompt(
+    "Select a small model to use with Claude Code",
+    {
+      type: "select",
+      options: models.map((m) => m.id),
+    },
+  )
+
+  return { config: { model, smallModel }, shouldPersist: true }
+}
+
+function copyClaudeCommand(command: string) {
+  try {
+    clipboard.writeSync(command)
+    consola.success("Copied Claude Code command to clipboard!")
+  } catch {
+    consola.warn(
+      "Failed to copy to clipboard. Here is the Claude Code command:",
+    )
+    consola.log(command)
+  }
+}
+
+async function handleClaudeCode(options: RunServerOptions, serverUrl: string) {
+  invariant(state.models, "Models should be loaded by now")
+  const models = state.models.data
+
+  const envConfig = getEnvClaudeConfig()
+  const storedConfig = await loadClaudeCodeConfig()
+
+  logStoredClaude(storedConfig)
+  await maybeClearStoredClaude(options)
+
+  const { config, shouldPersist } = await chooseClaudeModels(
+    options,
+    envConfig,
+    storedConfig,
+    models,
+  )
+
+  if (shouldPersist || options.claudeCodeReset) {
+    await saveClaudeCodeConfig(config)
+    consola.info(
+      `Saved Claude Code config to ${PATHS.CLAUDE_CODE_CONFIG_PATH}: model="${config.model}", small="${config.smallModel}"`,
+    )
+  }
+
+  const command = buildClaudeCommand(serverUrl, config.model, config.smallModel)
+  copyClaudeCommand(command)
+}
+
+async function handleCodex(options: RunServerOptions, serverUrl: string) {
+  invariant(state.models, "Models should be loaded by now")
+
+  const envCodexModel =
+    options.claudeCodeReset ? null : process.env.COPILOT_API_CODEX_MODEL
+
+  const selectedModel =
+    envCodexModel
+    ?? (await consola.prompt("Select a model to use with Codex", {
+      type: "select",
+      options: state.models.data.map((model) => model.id),
+    }))
+
+  const codexCommand = buildCodexCommand(serverUrl, selectedModel)
+
+  if (!options.daemon || !envCodexModel) {
+    try {
+      clipboard.writeSync(codexCommand)
+      consola.success("Copied Codex command to clipboard!")
+    } catch {
+      consola.warn("Failed to copy Codex command. Here it is:")
+      consola.log(codexCommand)
+    }
+  } else {
+    consola.info("Using preselected Codex model from daemon setup.")
+  }
+}
+
+export async function runServer(options: RunServerOptions): Promise<void> {
+  const serverUrl = await baseSetup(options)
+
+  if (options.accountType !== "individual") {
+    consola.info(`Using ${options.accountType} plan GitHub account`)
+  }
+
+  if (options.claudeCode) {
+    await handleClaudeCode(options, serverUrl)
+  }
+
+  if (options.codex) {
+    await handleCodex(options, serverUrl)
   }
 
   consola.box(
@@ -296,11 +484,24 @@ export const start = defineCommand({
     }
 
     if (args.daemon && process.env.COPILOT_API_IS_DAEMON !== "1") {
-      await ensurePaths()
+      const envExtras = await prepareDaemon(options)
+
+      // Check for existing running daemon
+      const pidRaw = (
+        await fs.readFile(PATHS.PID_PATH, "utf8").catch(() => "")
+      ).trim()
+      const existingPid = Number.parseInt(pidRaw, 10)
+      if (!Number.isNaN(existingPid) && isProcessRunning(existingPid)) {
+        consola.error(
+          `A Copilot API daemon is already running (pid ${existingPid}). Stop it first: copilot-api-pro stop`,
+        )
+        process.exit(1)
+      }
+
       const child = spawn(process.argv[0], process.argv.slice(1), {
         detached: true,
         stdio: "ignore",
-        env: { ...process.env, COPILOT_API_IS_DAEMON: "1" },
+        env: { ...process.env, COPILOT_API_IS_DAEMON: "1", ...envExtras },
       })
 
       await fs.writeFile(PATHS.PID_PATH, String(child.pid))
@@ -308,7 +509,8 @@ export const start = defineCommand({
         `Copilot API server is starting in the background (pid ${child.pid}).`,
       )
       child.unref()
-      return
+      // Ensure parent process exits after spawning daemon
+      process.exit(0)
     }
 
     return runServer(options)

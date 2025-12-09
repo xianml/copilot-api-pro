@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 
-import process from "node:process"
-
 import { defineCommand } from "citty"
 import consola from "consola"
 import fs from "node:fs/promises"
+import process from "node:process"
 
 import { PATHS, ensurePaths } from "./lib/paths"
 
@@ -32,4 +31,3 @@ export const stop = defineCommand({
     }
   },
 })
-
