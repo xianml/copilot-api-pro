@@ -1,62 +1,58 @@
 # Copilot API Pro
 
-Fork of [ericc-ch/copilot-api](https://github.com/ericc-ch/copilot-api) that adds OpenAI `/v1/responses`, persistent Claude Code model selection, daemon-friendly start/stop, and tighter error handling. CLI name: `copilot-api-pro`.
+> [!NOTE]
+>
+> This project is a fork of [ericc-ch/copilot-api](https://github.com/ericc-ch/copilot-api) by [ericc-ch](https://github.com/ericc-ch).
 
+> [!NOTE]
+>
 > This is a reverse-engineered proxy of GitHub Copilot. It is unofficial and may break at any time.
 
-## Highlights
-- OpenAI-compatible endpoints (including `/v1/responses` for GPT-4.1 / gpt-5.1-codex) and Anthropic-compatible `/v1/messages`.
-- One-shot Claude Code setup: select models once, persist them, and reuse with `--daemon`.
-- Codex CLI helper: generates `wire_api=responses` command for Codex.
-- Manual approval and rate-limit guard rails to reduce Copilot abuse flags.
-- Background daemon with `start --daemon` and `stop`.
+<https://github.com/user-attachments/assets/b28e6205-32d9-4967-84f3-293086743489>
 
-## Requirements
-- Bun 1.0+ recommended.
-- A GitHub Copilot account (individual, business, or enterprise).
-- Files are stored under `~/.local/share/copilot-api` (tokens, Claude Code config, daemon pid).
+This project supports both Claude Code and Codex with additional features:
+- support both Codex and Claude Code
+- daemon-friendly start/stop
+- persistent configuration for Claude Code and Codex
+- more features to come...
+
+
+## Prerequisites
+- GitHub Copilot account. Please enable copilot models in [GitHub Copilot Settings](https://github.com/settings/copilot/features)
+- [Claude Code](https://claude.com/product/claude-code) and [Codex](https://developers.openai.com/codex/cli/)
 
 ## Quick start
+
 ```sh
-# Foreground / background
-npx copilot-api-pro@latest start
-npx copilot-api-pro@latest start --daemon
+# setp 1: start in background with Codex or Claude Code
+npx copilot-api-pro@latest start --codex|claude-code --daemon
+
+# step 2: select the model you want to use if it is the first time you use it
+
+# step 3: paste the auto generated command in you clipboard to your terminal and enjoy!
+codex -c model_providers.copilot-api.name=copilot-api -c model_providers.copilot-api.base_url=http://localhost:4141/v1 -c model_providers.copilot-api.wire_api=responses -c model_provider=copilot-api -c model_reasoning_effort=high -m gpt-5
+
+# step 4: stop the server if you want to stop it
 npx copilot-api-pro@latest stop
 
-# Claude Code (select & persist models, copy command)
-npx copilot-api-pro@latest start --claude-code
-
-# Reset Claude Code selection
-npx copilot-api-pro@latest start --claude-code --reset
-
-# Codex (generate wire_api=responses command)
-npx copilot-api-pro@latest start --codex
-
-# Show usage
+# step 5: show usage
 npx copilot-api-pro@latest check-usage
 ```
 
 ## Help
-`npx copilot-api-pro@latest --help` shows the command list (command name is `copilot-api-pro`):
-```
+
+```sh
+npx copilot-api-pro@latest --help
+
 USAGE copilot-api-pro auth|start|stop|check-usage|debug
 
 COMMANDS
-        auth         Run GitHub auth flow without running the server
-        start        Start the Copilot API server
-        stop         Stop the background Copilot API server started with --daemon
-        check-usage  Show current GitHub Copilot usage/quota information
-        debug        Print debug information about the application
+
+         auth    Run GitHub auth flow without running the server             
+        start    Start the Copilot API server                                
+         stop    Stop the background Copilot API server started with --daemon
+  check-usage    Show current GitHub Copilot usage/quota information         
+        debug    Print debug information about the application               
+
+Use copilot-api-pro <command> --help for more information about a command.
 ```
-
-## CLI
-- `start` – start the server. Common flags: `-p/--port` (default 4141), `-a/--account-type` (`individual|business|enterprise`), `--manual`, `-r/--rate-limit <sec>`, `--wait`, `-g/--github-token <token>`, `--proxy-env`, `--claude-code`, `--reset`, `--codex`, `--daemon`, `--show-token`, `-v/--verbose`.
-- `auth` – run GitHub auth flow only (writes token).
-- `stop` – stop the `--daemon` background process.
-- `check-usage` – print Copilot usage/quotas.
-- `debug` – print version/runtime/path info (`--json` available).
-
-## API surface
-- OpenAI: `/v1/chat/completions`, `/v1/embeddings`, `/v1/models`, `/v1/responses`.
-- Anthropic: `/v1/messages`, `/v1/messages/count_tokens`.
-- Usage: `/usage`, token debug: `/token`.
